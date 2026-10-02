@@ -15,6 +15,29 @@ class SquareExpertChatbot:
     }
     # Ký hiệu 1 chữ cái: chỉ nhận khi có dạng "a = 5", "s: 25"
     SYMBOLS = {"a": "canh", "p": "chu_vi", "s": "dien_tich"}
+    
+    LABEL = {"canh": "cạnh", "chu_vi": "chu vi", "dien_tich": "diện tích"}
+    
+    # Tap luat
+    # Mỗi luật: biết `need` -> tính `give`
+    RULES = [
+        dict(need="canh", give="chu_vi", sym="P",
+             expl="P = 4 * a với a là cạnh",
+             fn=lambda x: 4 * x,
+             expr=lambda s: f"4 * {s}"),
+        dict(need="canh", give="dien_tich", sym="S",
+             expl="S = a * a với a là cạnh",
+             fn=lambda x: x * x,
+             expr=lambda s: f"{s} * {s}"),
+        dict(need="chu_vi", give="canh", sym="a",
+             expl="a = P / 4 với P là chu vi",
+             fn=lambda x: x / 4,
+             expr=lambda s: f"{s} / 4"),
+        dict(need="dien_tich", give="canh", sym="a",
+             expl="a = √S với S là diện tích",
+             fn=lambda x: math.sqrt(x),
+             expr=lambda s: f"√{s}"),
+    ]
 
     def __init__(self):
         # Danh sách (biến thể, từ chuẩn), xếp dài trước để "do dai canh" thắng "canh"
@@ -33,7 +56,11 @@ class SquareExpertChatbot:
         text = text.lower().replace("đ", "d")
         text = unicodedata.normalize("NFD", text)
         return "".join(c for c in text if unicodedata.category(c) != "Mn")
-
+    
+    @staticmethod
+    def _fmt(v):
+        return int(v) if float(v).is_integer() else round(v, 2)
+    # chuan hoa input
     def normalize(self, text):
         t = self._strip(text)
         t = re.sub(r"[_\-]+", " ", t)           # chu_vi, chu-vi -> chu vi
@@ -60,7 +87,7 @@ class SquareExpertChatbot:
 
     def parse_input(self, text):
         t = self.normalize(text)
-        #Tap tri thuc va muc tieu
+        #Tap tri thuc da biet va muc tieu
         knowns, targets = {}, []
 
         names = "|".join(self.ALIASES)  # canh|chu_vi|dien_tich
@@ -83,50 +110,74 @@ class SquareExpertChatbot:
 
     # Suy dien tien
     def infer(self, knowns):
+        """Suy diễn tiến: lặp áp dụng luật đến khi không sinh thêm được gì."""
+        steps = []
         while True:
             updated = False
-            if "canh" in knowns and knowns["canh"] >= 0:
-                a = knowns["canh"]
-                if "chu_vi" not in knowns:
-                    knowns["chu_vi"] = 4 * a; updated = True
-                if "dien_tich" not in knowns:
-                    knowns["dien_tich"] = a ** 2; updated = True
-            if "chu_vi" in knowns and knowns["chu_vi"] >= 0:
-                p = knowns["chu_vi"]
-                if "canh" not in knowns:
-                    knowns["canh"] = p / 4; updated = True
-                if "dien_tich" not in knowns:
-                    knowns["dien_tich"] = (p / 4) ** 2; updated = True
-            if "dien_tich" in knowns and knowns["dien_tich"] >= 0:
-                s = knowns["dien_tich"]
-                if "canh" not in knowns:
-                    knowns["canh"] = math.sqrt(s); updated = True
-                if "chu_vi" not in knowns:
-                    knowns["chu_vi"] = 4 * math.sqrt(s); updated = True
+            #Duyet qua tung luat trong RULES
+            for r in self.RULES:
+                #Neu du kien can cho cong thuc nam trong tap tri thuc va
+                #ket qua se co duoc khi ap dung cong thuc chua co trong tap knowns
+                #Thi ta su dung cong thuc do tinh ra ket qua va them no vao tap tri thuc
+                if r["need"] in knowns and r["give"] not in knowns:
+                    x = knowns[r["need"]]
+                    if x < 0:                      # số âm: không hợp lệ
+                        continue
+                    v = r["fn"](x)
+                    knowns[r["give"]] = v
+                    steps.append({"rule": r, "x": x, "value": v})
+                    updated = True
             if not updated:
                 break
-        return knowns
+        return knowns, steps
+    
+    def trace(self, target, given, steps):
+        """Truy ngược từ target: chỉ giữ dữ kiện và bước thật sự cần."""
+        by_give = {s["rule"]["give"]: s for s in steps}
+        used_given, used_steps = [], []
 
+        def visit(attr):
+            if attr in given:
+                if attr not in used_given:
+                    used_given.append(attr)
+                return
+            st = by_give[attr]
+            visit(st["rule"]["need"])              # truy tiếp dữ kiện của bước này
+            if st not in used_steps:
+                used_steps.append(st)              # thêm sau => đúng thứ tự giải
+
+        visit(target)
+        return used_given, used_steps
+    
+    def explain(self, target, given, steps):
+        f, L = self._fmt, self.LABEL
+        used_given, used_steps = self.trace(target, given, steps)
+
+        lines = [f"Ta có {L[k]} hình vuông = {f(given[k])}" for k in used_given]
+        for st in used_steps:
+            r = st["rule"]
+            lines.append(f"Áp dụng công thức tính {L[r['give']]} hình vuông "
+                         f"{r['expl']} ta được")
+            lines.append(f"{r['sym']} = {r['expr'](str(f(st['x'])))} = {f(st['value'])}")
+        if not used_steps:                         # target vốn đã được cho sẵn
+            lines.append(f"Vậy {L[target]} = {f(given[target])}")
+        return "\n".join(lines)
+    
     def reply(self, user_input):
-        #Chuyen input thanh tap tri thuc va muc tieu
         knowns, targets = self.parse_input(user_input)
         if not knowns:
-            return "Output = [Không thể tìm thấy: thiếu dữ liệu. Ví dụ: 'cạnh là 5']"
-        full = self.infer(dict(knowns))
-        results, missing = [], []
+            return "Không thể tìm thấy: thiếu dữ liệu. Ví dụ: 'cạnh là 5'"
+
+        given = dict(knowns)
+        full, steps = self.infer(dict(knowns))
+
+        blocks = []
         for t in targets:
             if t in full:
-                v = full[t]
-                v = int(v) if float(v).is_integer() else round(v, 2)
-                results.append(f"{t.replace('_', ' ').capitalize()}: {v}")
+                blocks.append(self.explain(t, given, steps))
             else:
-                missing.append(t.replace("_", " "))
-        if results:
-            out = ", ".join(results)
-            if missing:
-                out += f" (Không thể tính: {', '.join(missing)})"
-            return f"Output = [{out}]"
-        return "Output = [Không thể tìm thấy: dữ liệu không đủ để tính]"
+                blocks.append(f"Không thể tính {self.LABEL[t]} từ dữ kiện đã cho.")
+        return "\n\n".join(blocks)
 
 
 bot = SquareExpertChatbot()
